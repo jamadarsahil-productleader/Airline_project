@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>FareFlow · API pilot</title>
+  <style>
+    :root{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;color:#19304b;background:#f4f7fb}
+    *{box-sizing:border-box}body{margin:0}header{background:#082443;color:#fff;padding:25px max(18px,calc((100vw - 1080px)/2))}
+    header h1{margin:0;font-size:30px}header p{margin:5px 0 0;color:#c7daf1}.note{background:#fff0ca;color:#594414;padding:12px 16px;border-radius:9px;font-size:14px}
+    main{max-width:1080px;margin:22px auto;padding:0 18px;display:grid;grid-template-columns:1.1fr .9fr;gap:17px}
+    .stack{display:grid;gap:17px}.card{background:white;border:1px solid #dce4ed;border-radius:13px;padding:19px;min-width:0}
+    h2{font-size:18px;margin:0 0 13px}.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:11px}
+    label{display:grid;gap:5px;font-size:13px;font-weight:650}input,select,textarea{font:inherit;border:1px solid #bccbdc;border-radius:7px;padding:10px;width:100%;color:#19304b}
+    textarea{height:125px;resize:vertical}.full{grid-column:1/-1}.hint{font-size:13px;color:#526780;margin:7px 0}
+    button{font:inherit;font-weight:650;background:#1466cc;border:0;border-radius:8px;color:#fff;padding:11px 15px;cursor:pointer}
+    button:disabled{opacity:.5;cursor:wait}.secondary{background:#244768}.row{display:flex;flex-wrap:wrap;gap:9px;margin-top:13px}
+    .offer{display:block;padding:12px;border:1px solid #d1dcea;border-radius:8px;margin:8px 0;cursor:pointer;overflow-wrap:anywhere}
+    .offer:has(input:checked){border:2px solid #1466cc;background:#f0f7ff}.offer small{display:block;color:#526780;margin-top:4px}
+    .result{white-space:pre-wrap;font-size:14px;line-height:1.55}.status{color:#8a420d;font-size:13px;min-height:18px}
+    .sticky{position:sticky;top:14px}.bad{color:#b42318}.ok{color:#086449}
+    @media(max-width:780px){main{grid-template-columns:1fr}.sticky{position:static}.grid{grid-template-columns:repeat(2,1fr)}}
+    @media(max-width:500px){.grid{grid-template-columns:1fr}}
+  </style>
+</head>
+<body>
+<header><h1>✈ FareFlow</h1><p>Booking request → test API offers → human-reviewed quotation</p></header>
+<main>
+  <div class="stack">
+    <div class="note full"><b>TEST MODE ONLY.</b> Duffel test offers are not live or bookable for real travellers. Do not send this quotation to customers.</div>
+    <section class="card">
+      <h2>1. Booking request</h2>
+      <p class="hint">Paste from your private Google Sheet, or enter details below. Email is not connected to this site.</p>
+      <textarea id="request">Please quote a marine fare for Ravi Kumar from Mumbai to Singapore on 25 October 2026. Economy, one passenger. He is joining MV Atlantic Star.</textarea>
+      <div class="row"><button id="extract">Extract details</button></div>
+    </section>
+    <section class="card">
+      <h2>2. Check flight search</h2>
+      <div class="grid">
+        <label>Origin IATA<input id="origin" maxlength="3" placeholder="BOM"></label>
+        <label>Destination IATA<input id="destination" maxlength="3" placeholder="SIN"></label>
+        <label>Departure date<input id="date" type="date"></label>
+        <label>Adults<input id="adults" type="number" min="1" max="9" value="1"></label>
+        <label>Cabin<select id="cabin"><option value="economy">Economy</option><option value="premium_economy">Premium economy</option><option value="business">Business</option><option value="first">First</option></select></label>
+        <label>Fare category<select id="fareType"><option>Marine</option><option>Corporate</option><option>Published</option></select></label>
+        <label class="full">Pilot access code (not a Gmail password)<input id="accessCode" type="password" autocomplete="off" placeholder="Set in Cloudflare as FAFF_DEMO_CODE"></label>
+      </div>
+      <p class="hint">Marine/corporate selection is a label only. The test API does not return your agency's private fares.</p>
+      <div class="row"><button id="search">Search Duffel test offers</button></div>
+      <p class="status" id="searchStatus"></p>
+    </section>
+    <section class="card">
+      <h2>3. Pick an offer</h2>
+      <div id="offers" class="hint">Search to see test API offers.</div>
+    </section>
+  </div>
+  <aside class="stack sticky">
+    <section class="card">
+      <h2>4. Confirm selected offer</h2>
+      <p class="hint">A second API call refreshes the selected offer. No payment, PNR or ticket is created.</p>
+      <div class="row"><button id="confirm" class="secondary">Refresh price</button></div>
+      <p class="status" id="priceStatus"></p>
+    </section>
+    <section class="card">
+      <h2>5. Internal draft quotation</h2>
+      <label>Illustrative markup %<input id="markup" type="number" min="0" max="30" step=".5" value="5"></label>
+      <label>Illustrative service fee, offer currency<input id="fee" type="number" min="0" max="10000" step="1" value="0"></label>
+      <p class="hint">Supplier total already includes its pricing components. No GST or currency conversion is calculated. These example fees are not approved agency rules.</p>
+      <div id="quote" class="result">Choose a test offer and click “Refresh price.”</div>
+      <div class="row"><button id="download" class="secondary" disabled>Download internal draft</button></div>
+    </section>
+  </aside>
+</main>
+<script>
+  const $ = id => document.getElementById(id);
+  const cities = {MUMBAI:"BOM",BOMBAY:"BOM",SINGAPORE:"SIN",DUBAI:"DXB",DELHI:"DEL",DOHA:"DOH",LONDON:"LHR",BENGALURU:"BLR"};
+  let offers = [], selected = null, confirmed = null, draft = "";
+  function status(id, message, bad=false){$(id).textContent=message;$(id).className="status "+(bad?"bad":"ok")}
+  function clean(){confirmed=null;draft="";$("quote").textContent="Choose a test offer and click “Refresh price.”";$("download").disabled=true;$("priceStatus").textContent=""}
+  function extract(){
+    const t=$("request").value, u=t.toUpperCase(), found=[];
+    for(const [city,code] of Object.entries(cities))if(u.includes(city)&&!found.includes(code))found.push(code);
+    $("origin").value=found[0]||"";$("destination").value=found[1]||"";
+    const d=t.match(/\b(\d{1,2})\s+(January|February|March|April|May|June|July|August|September|October|November|December)\s+(20\d{2})\b/i);
+    if(d){const months=["january","february","march","april","may","june","july","august","september","october","november","december"];const m=months.indexOf(d[2].toLowerCase())+1;$("date").value=d[3]+"-"+String(m).padStart(2,"0")+"-"+String(+d[1]).padStart(2,"0")}
+    const p=t.match(/(\d+)\s*(?:passengers?|pax)/i);$("adults").value=p?p[1]:"1";
+    $("cabin").value=/business/i.test(t)?"business":/first/i.test(t)?"first":/premium/i.test(t)?"premium_economy":"economy";
+    $("fareType").value=/marine|vessel/i.test(t)?"Marine":/corporate/i.test(t)?"Corporate":"Published";
+    status("searchStatus","Review every field; extraction is a simple pattern matcher.");
+  }
+  async function call(path, body){
+    const r=await fetch(path,{method:"POST",headers:{"Content-Type":"application/json","X-FareFlow-Demo-Code":$("accessCode").value},body:JSON.stringify(body),cache:"no-store"});
+    let data;try{data=await r.json()}catch{throw Error("Server did not return JSON. Was the functions folder deployed through Git or Wrangler?")}
+    if(!r.ok)throw Error(data.error||("Request failed: "+r.status));return data;
+  }
+  function format(amount,currency){try{return new Intl.NumberFormat("en",{style:"currency",currency}).format(Number(amount))}catch{return currency+" "+amount}}
+  function renderOffers(){
+    $("offers").replaceChildren();
+    if(!offers.length){$("offers").textContent="No test offers returned. Try another route or date.";return}
+    offers.forEach((o,i)=>{
+      const label=document.createElement("label");label.className="offer";
+      const radio=document.createElement("input");radio.type="radio";radio.name="offer";radio.value=String(i);radio.checked=selected===i;
+      radio.addEventListener("change",()=>{selected=i;clean()});
+      const title=document.createTextNode(" "+(o.airline||"Airline")+" · "+format(o.amount,o.currency));
+      const small=document.createElement("small");small.textContent=o.route+" · "+(o.departure||"Time unavailable")+" · "+(o.connections===null?"?":o.connections)+" stop(s) · ID "+o.id;
+      label.append(radio,title,small);$("offers").append(label);
+    });
+  }
+  async function search(){
+    const origin=$("origin").value.trim().toUpperCase(),destination=$("destination").value.trim().toUpperCase(),date=$("date").value,adults=Number($("adults").value);
+    if(!/^[A-Z]{3}$/.test(origin)||!/^[A-Z]{3}$/.test(destination)||origin===destination||!/^\d{4}-\d{2}-\d{2}$/.test(date)||!Number.isInteger(adults)||adults<1||adults>9){status("searchStatus","Enter distinct 3-letter airports, a date, and 1–9 adults.",true);return}
+    $("search").disabled=true;status("searchStatus","Searching test API...");offers=[];selected=null;clean();renderOffers();
+    try{const data=await call("/api/flights",{origin,destination,date,adults,cabin:$("cabin").value});offers=data.offers||[];renderOffers();status("searchStatus",offers.length+" TEST offer(s). These are not live fares.")}
+    catch(e){status("searchStatus",e.message,true)}finally{$("search").disabled=false}
+  }
+  async function refresh(){
+    if(selected===null||!offers[selected]){status("priceStatus","Select a flight first.",true);return}
+    $("confirm").disabled=true;status("priceStatus","Refreshing offer...");clean();
+    try{confirmed=await call("/api/price",{offerId:offers[selected].id});status("priceStatus","TEST offer refreshed. Do not use for customer quotes.");renderQuote()}
+    catch(e){status("priceStatus",e.message,true)}finally{$("confirm").disabled=false}
+  }
+  function renderQuote(){
+    if(!confirmed)return;
+    const markup=Number($("markup").value),fee=Number($("fee").value),base=Number(confirmed.amount);
+    if(!Number.isFinite(base)||base<0||!Number.isFinite(markup)||markup<0||markup>30||!Number.isFinite(fee)||fee<0||fee>10000){$("quote").textContent="Enter a valid markup (0–30%) and service fee (0–10,000).";$("download").disabled=true;return}
+    const currency=confirmed.currency,total=base+base*markup/100+fee;
+    draft=["FAREFLOW — INTERNAL TEST DRAFT","NOT A CUSTOMER QUOTATION. NOT A REAL OR NEGOTIATED FARE.","", "Route: "+$("origin").value.toUpperCase()+" → "+$("destination").value.toUpperCase(),"Date: "+$("date").value,"Adults: "+$("adults").value,"Fare category: "+$("fareType").value+" (label only)","Airline: "+(confirmed.airline||"Unknown"),"Test offer ID: "+confirmed.id,"Test API total: "+format(base,currency),"Illustrative markup: "+markup+"%","Illustrative service fee: "+format(fee,currency),"Illustrative total: "+format(total,currency),"","No GST, private-fare validation, booking or ticketing performed.","Price can change; test offers are not live inventory."].join("\n");
+    $("quote").textContent=draft;$("download").disabled=false;
+  }
+  function download(){if(!draft)return;const a=document.createElement("a"),url=URL.createObjectURL(new Blob([draft],{type:"text/plain"}));a.href=url;a.download="fareflow-internal-test-draft.txt";a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)}
+  $("extract").onclick=extract;$("search").onclick=search;$("confirm").onclick=refresh;$("download").onclick=download;
+  $("markup").oninput=renderQuote;$("fee").oninput=renderQuote;
+  for(const id of ["origin","destination","date","adults","cabin"])$(id).addEventListener("change",()=>{offers=[];selected=null;clean();$("offers").textContent="Search again after changing the itinerary."});
+  extract();
+</script>
+</body>
+</html>
