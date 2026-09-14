@@ -28,8 +28,16 @@
   <div class="stack">
     <div class="note full"><b>TEST MODE ONLY.</b> Duffel test offers are not live or bookable for real travellers. Do not send this quotation to customers.</div>
     <section class="card">
+      <h2>0. Email bookings from your Google Sheet</h2>
+      <p class="hint">Enter the pilot access code below, then load your imported Bookings rows. This is a private pilot; do not use real customer data without proper access control.</p>
+      <div class="row"><button id="loadBookings" class="secondary">Load booking emails</button></div>
+      <p class="status" id="inboxStatus"></p>
+      <label>Select booking<select id="bookingSelect"><option value="">Choose a booking email</option></select></label>
+      <p class="hint" id="bookingInfo">No email selected; manual entry still works.</p>
+    </section>
+    <section class="card">
       <h2>1. Booking request</h2>
-      <p class="hint">Paste from your private Google Sheet, or enter details below. Email is not connected to this site.</p>
+      <p class="hint">Selecting a booking above fills this box. Please check the extracted route and date yourself.</p>
       <textarea id="request">Please quote a marine fare for Ravi Kumar from Mumbai to Singapore on 25 October 2026. Economy, one passenger. He is joining MV Atlantic Star.</textarea>
       <div class="row"><button id="extract">Extract details</button></div>
     </section>
@@ -42,7 +50,7 @@
         <label>Adults<input id="adults" type="number" min="1" max="9" value="1"></label>
         <label>Cabin<select id="cabin"><option value="economy">Economy</option><option value="premium_economy">Premium economy</option><option value="business">Business</option><option value="first">First</option></select></label>
         <label>Fare category<select id="fareType"><option>Marine</option><option>Corporate</option><option>Published</option></select></label>
-        <label class="full">Pilot access code (not a Gmail password)<input id="accessCode" type="password" autocomplete="off" placeholder="Set in Cloudflare as FAFF_DEMO_CODE"></label>
+        <label class="full">Pilot access code (not a Gmail password)<input id="accessCode" type="password" autocomplete="off" placeholder="Set in Cloudflare as FAREFLOW_DEMO_CODE"></label>
       </div>
       <p class="hint">Marine/corporate selection is a label only. The test API does not return your agency's private fares.</p>
       <div class="row"><button id="search">Search Duffel test offers</button></div>
@@ -67,15 +75,18 @@
       <p class="hint">Supplier total already includes its pricing components. No GST or currency conversion is calculated. These example fees are not approved agency rules.</p>
       <div id="quote" class="result">Choose a test offer and click “Refresh price.”</div>
       <div class="row"><button id="download" class="secondary" disabled>Download internal draft</button></div>
+      <p class="hint">After you review this TEST quotation, make a reply draft in the original Gmail conversation. This button NEVER sends email.</p>
+      <div class="row"><button id="createDraft" class="secondary" disabled>Approve TEST text &amp; create Gmail draft</button></div>
+      <p class="status" id="draftStatus"></p>
     </section>
   </aside>
 </main>
 <script>
   const $ = id => document.getElementById(id);
   const cities = {MUMBAI:"BOM",BOMBAY:"BOM",SINGAPORE:"SIN",DUBAI:"DXB",DELHI:"DEL",DOHA:"DOH",LONDON:"LHR",BENGALURU:"BLR"};
-  let offers = [], selected = null, confirmed = null, draft = "";
+  let offers = [], selected = null, confirmed = null, draft = "", bookings = [], selectedBooking = null;
   function status(id, message, bad=false){$(id).textContent=message;$(id).className="status "+(bad?"bad":"ok")}
-  function clean(){confirmed=null;draft="";$("quote").textContent="Choose a test offer and click “Refresh price.”";$("download").disabled=true;$("priceStatus").textContent=""}
+  function clean(){confirmed=null;draft="";$("quote").textContent="Choose a test offer and click “Refresh price.”";$("download").disabled=true;$("createDraft").disabled=true;$("draftStatus").textContent="";$("priceStatus").textContent=""}
   function extract(){
     const t=$("request").value, u=t.toUpperCase(), found=[];
     for(const [city,code] of Object.entries(cities))if(u.includes(city)&&!found.includes(code))found.push(code);
@@ -89,10 +100,28 @@
   }
   async function call(path, body){
     const r=await fetch(path,{method:"POST",headers:{"Content-Type":"application/json","X-FareFlow-Demo-Code":$("accessCode").value},body:JSON.stringify(body),cache:"no-store"});
-    let data;try{data=await r.json()}catch{throw Error("Server did not return JSON. Was the functions folder deployed through Git or Wrangler?")}
+    let data;try{data=await r.json()}catch{throw Error("Server did not return JSON. Check the current Worker deployment.")}
     if(!r.ok)throw Error(data.error||("Request failed: "+r.status));return data;
   }
   function format(amount,currency){try{return new Intl.NumberFormat("en",{style:"currency",currency}).format(Number(amount))}catch{return currency+" "+amount}}
+  async function loadBookings(){
+    $("loadBookings").disabled=true;status("inboxStatus","Loading Bookings sheet...");
+    try{
+      const result=await call("/api/bookings",{});bookings=result.bookings||[];
+      $("bookingSelect").replaceChildren(new Option("Choose a booking email",""));
+      bookings.forEach((b,i)=>$("bookingSelect").add(new Option((b.received||"")+" | "+(b.subject||"No subject")+" | "+(b.status||"New"),String(i))));
+      status("inboxStatus",bookings.length+" imported booking(s). Choose one below.");
+    }catch(e){status("inboxStatus",e.message,true)}finally{$("loadBookings").disabled=false}
+  }
+  function selectBooking(){
+    const index=$("bookingSelect").value;
+    selectedBooking=index===""?null:bookings[Number(index)];
+    $("bookingInfo").textContent=selectedBooking?
+      "From: "+selectedBooking.from+" | Subject: "+selectedBooking.subject+" | Status: "+selectedBooking.status:
+      "No email selected; manual entry still works.";
+    if(selectedBooking){$("request").value=selectedBooking.request||"";offers=[];selected=null;clean();$("offers").textContent="Search for offers after reviewing the itinerary.";extract()}
+    $("createDraft").disabled=!draft||!selectedBooking||selectedBooking.status==="Test draft created";
+  }
   function renderOffers(){
     $("offers").replaceChildren();
     if(!offers.length){$("offers").textContent="No test offers returned. Try another route or date.";return}
@@ -121,13 +150,23 @@
   function renderQuote(){
     if(!confirmed)return;
     const markup=Number($("markup").value),fee=Number($("fee").value),base=Number(confirmed.amount);
-    if(!Number.isFinite(base)||base<0||!Number.isFinite(markup)||markup<0||markup>30||!Number.isFinite(fee)||fee<0||fee>10000){$("quote").textContent="Enter a valid markup (0–30%) and service fee (0–10,000).";$("download").disabled=true;return}
+    if(!Number.isFinite(base)||base<0||!Number.isFinite(markup)||markup<0||markup>30||!Number.isFinite(fee)||fee<0||fee>10000){draft="";$("quote").textContent="Enter a valid markup (0–30%) and service fee (0–10,000).";$("download").disabled=true;$("createDraft").disabled=true;return}
     const currency=confirmed.currency,total=base+base*markup/100+fee;
     draft=["FAREFLOW — INTERNAL TEST DRAFT","NOT A CUSTOMER QUOTATION. NOT A REAL OR NEGOTIATED FARE.","", "Route: "+$("origin").value.toUpperCase()+" → "+$("destination").value.toUpperCase(),"Date: "+$("date").value,"Adults: "+$("adults").value,"Fare category: "+$("fareType").value+" (label only)","Airline: "+(confirmed.airline||"Unknown"),"Test offer ID: "+confirmed.id,"Test API total: "+format(base,currency),"Illustrative markup: "+markup+"%","Illustrative service fee: "+format(fee,currency),"Illustrative total: "+format(total,currency),"","No GST, private-fare validation, booking or ticketing performed.","Price can change; test offers are not live inventory."].join("\n");
-    $("quote").textContent=draft;$("download").disabled=false;
+    $("quote").textContent=draft;$("download").disabled=false;$("createDraft").disabled=!selectedBooking||selectedBooking.status==="Test draft created";
   }
   function download(){if(!draft)return;const a=document.createElement("a"),url=URL.createObjectURL(new Blob([draft],{type:"text/plain"}));a.href=url;a.download="fareflow-internal-test-draft.txt";a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)}
+  async function createDraft(){
+    if(!selectedBooking||!draft){status("draftStatus","Select a booking and refresh a TEST offer first.",true);return}
+    if(!window.confirm("Create a TEST reply draft for "+selectedBooking.subject+"? It is NOT a real fare and must NOT be sent to a customer."))return;
+    $("createDraft").disabled=true;status("draftStatus","Creating a Gmail reply draft (not sending)...");
+    try{
+      const result=await call("/api/draft",{messageId:selectedBooking.id,body:draft,approved:true});
+      selectedBooking.status="Test draft created";status("draftStatus",result.message+" Open Gmail Drafts to review it.");
+    }catch(e){status("draftStatus",e.message,true);$("createDraft").disabled=false}
+  }
   $("extract").onclick=extract;$("search").onclick=search;$("confirm").onclick=refresh;$("download").onclick=download;
+  $("loadBookings").onclick=loadBookings;$("bookingSelect").onchange=selectBooking;$("createDraft").onclick=createDraft;
   $("markup").oninput=renderQuote;$("fee").oninput=renderQuote;
   for(const id of ["origin","destination","date","adults","cabin"])$(id).addEventListener("change",()=>{offers=[];selected=null;clean();$("offers").textContent="Search again after changing the itinerary."});
   extract();
